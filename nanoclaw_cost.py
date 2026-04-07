@@ -133,6 +133,7 @@ class SessionStats:
     jsonl_path: str
     is_subagent: bool = False
     calls: List[ApiCall] = field(default_factory=list)
+    tool_counts: Dict[str, int] = field(default_factory=lambda: defaultdict(int))
 
     # ── aggregates (computed lazily) ──
     def _agg(self, fam=None):
@@ -182,6 +183,14 @@ class SessionStats:
     def dominant_model(self):
         m = self.models_used()
         return max(m, key=m.get) if m else ""
+
+    def total_tool_calls(self) -> int:
+        return sum(self.tool_counts.values())
+
+    def web_search_cost(self) -> float:
+        """Estimate cost of web_search tool calls at $10/1000 searches."""
+        n = self.tool_counts.get("web_search", 0) + self.tool_counts.get("WebSearch", 0)
+        return n * 10.0 / 1000.0
 
 
 def parse_jsonl(path: str) -> SessionStats:
@@ -247,6 +256,12 @@ def parse_jsonl(path: str) -> SessionStats:
                     cache_read_tokens=usage.get("cache_read_input_tokens", 0),
                     output_tokens=usage.get("output_tokens", 0),
                 ))
+
+                # Count tool_use blocks in this assistant turn
+                for block in msg.get("content", []):
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        name = block.get("name", "unknown")
+                        stats.tool_counts[name] += 1
     except (OSError, PermissionError):
         pass
 
@@ -290,6 +305,8 @@ def aggregate(sessions: List[SessionStats]) -> SessionStats:
     agg = SessionStats(session_id="(total)", project="", jsonl_path="")
     for s in sessions:
         agg.calls.extend(s.calls)
+        for tool, cnt in s.tool_counts.items():
+            agg.tool_counts[tool] += cnt
     return agg
 
 
@@ -622,7 +639,8 @@ def main():
     hdr = (f"{'Project':<32} {'calls':>6}  "
            f"{'Input':>7} {'CacheW':>7} {'CacheR':>7} {'Output':>7}  "
            f"{'In$':>8} {'Out$':>8} {'Total$':>9}  "
-           f"{'sonnet':>7} {'opus':>7} {'haiku':>6}")
+           f"{'sonnet':>7} {'opus':>7} {'haiku':>6}  "
+           f"{'Tools':>6} {'WebSrch':>7} {'WS$':>6}")
     if not args.no_size:
         hdr += f"  {'Disk':>7}"
     print(hdr)
@@ -633,8 +651,11 @@ def main():
     for proj in projects:
         agg = project_aggs[proj]
         grand.calls.extend(agg.calls)
+        for tool, cnt in agg.tool_counts.items():
+            grand.tool_counts[tool] += cnt
         disk = disk_mb.get(proj, 0.0)
 
+        ws_n = agg.tool_counts.get("web_search", 0) + agg.tool_counts.get("WebSearch", 0)
         row = (
             f"{proj:<32} {agg.api_calls():>6,}  "
             f"{fmt_tok(agg.input_tokens()):>7} "
@@ -646,13 +667,17 @@ def main():
             f"{fmt_cost(agg.cost()):>9}  "
             f"{fmt_cost(agg.cost('sonnet')):>7} "
             f"{fmt_cost(agg.cost('opus')):>7} "
-            f"{fmt_cost(agg.cost('haiku')):>6}"
+            f"{fmt_cost(agg.cost('haiku')):>6}  "
+            f"{agg.total_tool_calls():>6,} "
+            f"{ws_n:>7,} "
+            f"{fmt_cost(agg.web_search_cost()):>6}"
         )
         if not args.no_size:
             row += f"  {disk:>6.1f}MB"
         print(row)
 
     print(sep)
+    ws_g = grand.tool_counts.get("web_search", 0) + grand.tool_counts.get("WebSearch", 0)
     row_g = (
         f"{'TOTAL':<32} {grand.api_calls():>6,}  "
         f"{fmt_tok(grand.input_tokens()):>7} "
@@ -664,16 +689,29 @@ def main():
         f"{fmt_cost(grand.cost()):>9}  "
         f"{fmt_cost(grand.cost('sonnet')):>7} "
         f"{fmt_cost(grand.cost('opus')):>7} "
-        f"{fmt_cost(grand.cost('haiku')):>6}"
+        f"{fmt_cost(grand.cost('haiku')):>6}  "
+        f"{grand.total_tool_calls():>6,} "
+        f"{ws_g:>7,} "
+        f"{fmt_cost(grand.web_search_cost()):>6}"
     )
     if not args.no_size:
         row_g += f"  {sum(disk_mb.values()):>6.1f}MB"
     print(row_g)
     print()
 
+    # ── Top tool calls breakdown ────────────────────────────────────────────────
+    if grand.tool_counts:
+        top_tools = sorted(grand.tool_counts.items(), key=lambda x: x[1], reverse=True)[:15]
+        print("Top tool calls (all projects):")
+        for tool, cnt in top_tools:
+            bar = "█" * min(40, int(cnt / max(1, top_tools[0][1]) * 40))
+            print(f"  {tool:<40} {cnt:>6,}  {bar}")
+        print()
+
     # ── Per-session detail (when --project) ────────────────────────────────────
     if args.project:
         for proj, sessions in project_sessions.items():
+            agg_p = project_aggs[proj]
             print(f"\n── Per-session: {proj} ──")
             print(f"{'Session':<40} {'sub':>3} {'calls':>6}  {'In$':>8} {'Out$':>8} {'Total$':>9}  {'Model'}")
             print("─" * 90)
@@ -688,6 +726,11 @@ def main():
                     f"{fmt_cost(s.cost()):>9}  "
                     f"{dm}"
                 )
+            if agg_p.tool_counts:
+                print(f"\n  Tool call breakdown ({agg_p.total_tool_calls()} total):")
+                top = sorted(agg_p.tool_counts.items(), key=lambda x: x[1], reverse=True)
+                for tool, cnt in top:
+                    print(f"    {tool:<40} {cnt:>5,}")
 
     # ── CSV ────────────────────────────────────────────────────────────────────
     if args.csv:
@@ -695,6 +738,7 @@ def main():
         rows = []
         for proj in projects:
             agg = project_aggs[proj]
+            ws_n = agg.tool_counts.get("web_search", 0) + agg.tool_counts.get("WebSearch", 0)
             rows.append({
                 "project": proj,
                 "api_calls": agg.api_calls(),
@@ -711,6 +755,9 @@ def main():
                 "opus_cost_usd": round(agg.cost("opus"), 5),
                 "haiku_cost_usd": round(agg.cost("haiku"), 5),
                 "dominant_model": agg.dominant_model(),
+                "total_tool_calls": agg.total_tool_calls(),
+                "web_search_calls": ws_n,
+                "web_search_cost_usd": round(agg.web_search_cost(), 5),
                 "disk_mb": round(disk_mb.get(proj, 0.0), 2),
             })
         with open(args.csv, "w", newline="") as f:
