@@ -62,15 +62,19 @@ python3 ~/Github/nanoclaw-cost-tracker/nanoclaw_cost.py ~/nanoclaw/data/sessions
 |--------|-------------|
 | calls | Number of assistant turns (= API requests made) |
 | Input | Raw uncached input tokens |
-| CacheW | Cache write tokens (priced at 1.25× input) |
+| CW-5m | Cache write tokens with 5-min TTL (priced at 1.25× input) |
+| CW-1h | Cache write tokens with 1-hour TTL (priced at 2× input) |
 | CacheR | Cache read tokens (priced at 0.1× input — very cheap) |
 | Output | Output tokens |
-| In$ | Cost of all incoming tokens (input + cache write + cache read) |
+| In$ | Cost of all incoming tokens (input + cache writes + cache read) |
 | Out$ | Cost of output tokens |
 | Total$ | Total estimated cost |
 | sonnet | Cost attributed to claude-sonnet-* models |
 | opus | Cost attributed to claude-opus-* models |
 | haiku | Cost attributed to claude-haiku-* models |
+| Tools | Total tool call invocations |
+| WebSrch | Number of web_search tool calls |
+| WS$ | Estimated web search cost ($10/1000 searches) |
 | Disk | Session directory size on disk |
 
 ## Plots

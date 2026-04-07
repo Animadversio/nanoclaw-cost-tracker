@@ -637,7 +637,7 @@ def main():
     print(sep)
 
     hdr = (f"{'Project':<32} {'calls':>6}  "
-           f"{'Input':>7} {'CacheW':>7} {'CacheR':>7} {'Output':>7}  "
+           f"{'Input':>7} {'CW-5m':>7} {'CW-1h':>7} {'CacheR':>7} {'Output':>7}  "
            f"{'In$':>8} {'Out$':>8} {'Total$':>9}  "
            f"{'sonnet':>7} {'opus':>7} {'haiku':>6}  "
            f"{'Tools':>6} {'WebSrch':>7} {'WS$':>6}")
@@ -659,7 +659,8 @@ def main():
         row = (
             f"{proj:<32} {agg.api_calls():>6,}  "
             f"{fmt_tok(agg.input_tokens()):>7} "
-            f"{fmt_tok(agg.cache_write_tokens()):>7} "
+            f"{fmt_tok(agg.cache_write_5m_tokens()):>7} "
+            f"{fmt_tok(agg.cache_write_1h_tokens()):>7} "
             f"{fmt_tok(agg.cache_read_tokens()):>7} "
             f"{fmt_tok(agg.output_tokens()):>7}  "
             f"{fmt_cost(agg.incoming_cost()):>8} "
@@ -681,7 +682,8 @@ def main():
     row_g = (
         f"{'TOTAL':<32} {grand.api_calls():>6,}  "
         f"{fmt_tok(grand.input_tokens()):>7} "
-        f"{fmt_tok(grand.cache_write_tokens()):>7} "
+        f"{fmt_tok(grand.cache_write_5m_tokens()):>7} "
+        f"{fmt_tok(grand.cache_write_1h_tokens()):>7} "
         f"{fmt_tok(grand.cache_read_tokens()):>7} "
         f"{fmt_tok(grand.output_tokens()):>7}  "
         f"{fmt_cost(grand.incoming_cost()):>8} "
