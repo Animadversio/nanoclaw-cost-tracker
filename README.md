@@ -89,13 +89,22 @@ X-axis adapts to the session time span:
 
 ## Pricing
 
-Uses Anthropic public API pricing ($/1M tokens, as of April 2025):
+Source: https://platform.claude.com/docs/en/about-claude/pricing (updated 2025-04-07)
 
-| Model family | Input | Cache Write | Cache Read | Output |
-|---|---|---|---|---|
-| claude-opus-4.x | $15 | $18.75 | $1.50 | $75 |
-| claude-sonnet-4.x | $3 | $3.75 | $0.30 | $15 |
-| claude-haiku-4.x | $0.80 | $1.00 | $0.08 | $4 |
+Cache writes have two tiers: 5-minute TTL (1.25× input) and 1-hour TTL (2× input).
+The JSONL stores these separately and both are tracked accurately.
+
+| Model | Input | Cache Write 5m | Cache Write 1h | Cache Read | Output |
+|---|---|---|---|---|---|
+| Claude Opus 4.6 / 4.5 | $5 | $6.25 | $10 | $0.50 | $25 |
+| Claude Opus 4.1 / 4.0 | $15 | $18.75 | $30 | $1.50 | $75 |
+| Claude Sonnet 4.x / 3.7 | $3 | $3.75 | $6 | $0.30 | $15 |
+| Claude Haiku 4.5 | $1 | $1.25 | $2 | $0.10 | $5 |
+| Claude Haiku 3.5 | $0.80 | $1.00 | $1.60 | $0.08 | $4 |
+| Claude Opus 3 | $15 | $18.75 | $30 | $1.50 | $75 |
+| Claude Haiku 3 | $0.25 | $0.30 | $0.50 | $0.03 | $1.25 |
+
+> Note: Opus 4.6/4.5 are $5/MTok input — significantly cheaper than Opus 4.1/4.0 ($15/MTok).
 
 Update the `PRICING` dict at the top of `nanoclaw_cost.py` to adjust.
 

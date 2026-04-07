@@ -23,21 +23,39 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import shutil
 
-# ── Pricing (per million tokens, Anthropic public pricing 2025-04) ────────────
-# (input, cache_write, cache_read, output) per 1M tokens
-PRICING: Dict[str, Tuple[float, float, float, float]] = {
-    "claude-opus-4":      (15.00, 18.75, 1.50, 75.00),
-    "claude-opus-4-5":    (15.00, 18.75, 1.50, 75.00),
-    "claude-sonnet-4":    ( 3.00,  3.75, 0.30, 15.00),
-    "claude-sonnet-4-6":  ( 3.00,  3.75, 0.30, 15.00),
-    "claude-haiku-4":     ( 0.80,  1.00, 0.08,  4.00),
-    "claude-haiku-4-5":   ( 0.80,  1.00, 0.08,  4.00),
-    # legacy
-    "claude-3-5-sonnet":  ( 3.00,  3.75, 0.30, 15.00),
-    "claude-3-opus":      (15.00, 18.75, 1.50, 75.00),
-    "claude-3-haiku":     ( 0.25,  0.30, 0.03,  1.25),
+# ── Pricing (per million tokens) ─────────────────────────────────────────────
+# Source: https://platform.claude.com/docs/en/about-claude/pricing (2025-04-07)
+#
+# Tuple: (input, cache_write_5m, cache_write_1h, cache_read, output)
+#   cache_write_5m  = 1.25× input  (5-minute TTL cache write)
+#   cache_write_1h  = 2.00× input  (1-hour  TTL cache write)
+#   cache_read      = 0.10× input  (cache hit / refresh)
+#
+# Matched by model-id prefix, longest match first.
+PRICING: Dict[str, Tuple[float, float, float, float, float]] = {
+    # ── Claude 4 series ───────────────────────────────────────────────────────
+    # Opus 4.6 / 4.5  — $5 input (NOT $15; only 4.1 and 4.0 are $15)
+    "claude-opus-4-6":        ( 5.00,  6.25, 10.00, 0.50, 25.00),
+    "claude-opus-4-5":        ( 5.00,  6.25, 10.00, 0.50, 25.00),
+    # Opus 4.1 / 4.0  — $15 input
+    "claude-opus-4-1":        (15.00, 18.75, 30.00, 1.50, 75.00),
+    "claude-opus-4-0":        (15.00, 18.75, 30.00, 1.50, 75.00),
+    "claude-opus-4":          (15.00, 18.75, 30.00, 1.50, 75.00),
+    # Sonnet 4.x  — $3 input
+    "claude-sonnet-4":        ( 3.00,  3.75,  6.00, 0.30, 15.00),
+    # Haiku 4.5  — $1 input
+    "claude-haiku-4-5":       ( 1.00,  1.25,  2.00, 0.10,  5.00),
+    "claude-haiku-4":         ( 1.00,  1.25,  2.00, 0.10,  5.00),
+    # ── Claude 3.x series ────────────────────────────────────────────────────
+    "claude-3-7-sonnet":      ( 3.00,  3.75,  6.00, 0.30, 15.00),
+    "claude-3-5-sonnet":      ( 3.00,  3.75,  6.00, 0.30, 15.00),
+    "claude-3-5-haiku":       ( 0.80,  1.00,  1.60, 0.08,  4.00),
+    "claude-3-opus":          (15.00, 18.75, 30.00, 1.50, 75.00),
+    "claude-3-haiku":         ( 0.25,  0.30,  0.50, 0.03,  1.25),
+    "claude-3-sonnet":        ( 3.00,  3.75,  6.00, 0.30, 15.00),
 }
-DEFAULT_PRICING = (3.00, 3.75, 0.30, 15.00)
+# Fallback if model string not matched (assume sonnet-4 pricing)
+DEFAULT_PRICING = (3.00, 3.75, 6.00, 0.30, 15.00)
 
 # Human-readable model family labels
 MODEL_FAMILIES = [
@@ -47,10 +65,12 @@ MODEL_FAMILIES = [
 ]
 
 
-def get_price(model: str) -> Tuple[float, float, float, float]:
-    for prefix, prices in PRICING.items():
+def get_price(model: str) -> Tuple[float, float, float, float, float]:
+    """Return (input, cache_write_5m, cache_write_1h, cache_read, output) per MTok."""
+    # Sort by prefix length descending so "claude-opus-4-6" matches before "claude-opus-4"
+    for prefix in sorted(PRICING, key=len, reverse=True):
         if model.startswith(prefix):
-            return prices
+            return PRICING[prefix]
     return DEFAULT_PRICING
 
 
@@ -62,9 +82,10 @@ def model_family(model: str) -> str:
     return model or "unknown"
 
 
-def tokens_to_cost(inp, cw, cr, out, model) -> float:
-    p_in, p_cw, p_cr, p_out = get_price(model)
-    return (inp * p_in + cw * p_cw + cr * p_cr + out * p_out) / 1_000_000
+def tokens_to_cost(inp, cw_5m, cw_1h, cr, out, model) -> float:
+    p_in, p_cw5, p_cw1, p_cr, p_out = get_price(model)
+    return (inp * p_in + cw_5m * p_cw5 + cw_1h * p_cw1 +
+            cr * p_cr + out * p_out) / 1_000_000
 
 
 # ── Data structures ────────────────────────────────────────────────────────────
@@ -75,26 +96,33 @@ class ApiCall:
     ts: datetime
     model: str
     input_tokens: int
-    cache_write_tokens: int
+    cache_write_5m_tokens: int   # ephemeral 5-min cache writes (1.25× input)
+    cache_write_1h_tokens: int   # ephemeral 1-hr  cache writes (2.00× input)
     cache_read_tokens: int
     output_tokens: int
 
     @property
+    def cache_write_tokens(self) -> int:
+        return self.cache_write_5m_tokens + self.cache_write_1h_tokens
+
+    @property
     def cost(self) -> float:
         return tokens_to_cost(
-            self.input_tokens, self.cache_write_tokens,
+            self.input_tokens, self.cache_write_5m_tokens, self.cache_write_1h_tokens,
             self.cache_read_tokens, self.output_tokens, self.model
         )
 
     @property
     def incoming_cost(self) -> float:
-        p_in, p_cw, p_cr, _ = get_price(self.model)
-        return (self.input_tokens * p_in + self.cache_write_tokens * p_cw +
+        p_in, p_cw5, p_cw1, p_cr, _ = get_price(self.model)
+        return (self.input_tokens * p_in +
+                self.cache_write_5m_tokens * p_cw5 +
+                self.cache_write_1h_tokens * p_cw1 +
                 self.cache_read_tokens * p_cr) / 1_000_000
 
     @property
     def outgoing_cost(self) -> float:
-        _, _, _, p_out = get_price(self.model)
+        _, _, _, _, p_out = get_price(self.model)
         return self.output_tokens * p_out / 1_000_000
 
 
@@ -116,6 +144,12 @@ class SessionStats:
 
     def cache_write_tokens(self, fam=None):
         return sum(c.cache_write_tokens for c in self._agg(fam))
+
+    def cache_write_5m_tokens(self, fam=None):
+        return sum(c.cache_write_5m_tokens for c in self._agg(fam))
+
+    def cache_write_1h_tokens(self, fam=None):
+        return sum(c.cache_write_1h_tokens for c in self._agg(fam))
 
     def cache_read_tokens(self, fam=None):
         return sum(c.cache_read_tokens for c in self._agg(fam))
@@ -189,11 +223,27 @@ def parse_jsonl(path: str) -> SessionStats:
                 except Exception:
                     ts = datetime.now(timezone.utc)
 
+                # The JSONL stores 5m vs 1h cache writes separately under
+                # usage.cache_creation.ephemeral_5m/1h_input_tokens.
+                # Fall back to splitting the total evenly if not present.
+                cache_creation = usage.get("cache_creation", {})
+                cw_5m = cache_creation.get("ephemeral_5m_input_tokens", None)
+                cw_1h = cache_creation.get("ephemeral_1h_input_tokens", None)
+                cw_total = usage.get("cache_creation_input_tokens", 0)
+                if cw_5m is None and cw_1h is None:
+                    # older format — assume all writes are 1h (conservative)
+                    cw_5m, cw_1h = 0, cw_total
+                elif cw_5m is None:
+                    cw_5m = cw_total - cw_1h
+                elif cw_1h is None:
+                    cw_1h = cw_total - cw_5m
+
                 stats.calls.append(ApiCall(
                     ts=ts,
                     model=msg.get("model", ""),
                     input_tokens=usage.get("input_tokens", 0),
-                    cache_write_tokens=usage.get("cache_creation_input_tokens", 0),
+                    cache_write_5m_tokens=max(0, cw_5m),
+                    cache_write_1h_tokens=max(0, cw_1h),
                     cache_read_tokens=usage.get("cache_read_input_tokens", 0),
                     output_tokens=usage.get("output_tokens", 0),
                 ))
@@ -649,7 +699,8 @@ def main():
                 "project": proj,
                 "api_calls": agg.api_calls(),
                 "input_tokens": agg.input_tokens(),
-                "cache_write_tokens": agg.cache_write_tokens(),
+                "cache_write_5m_tokens": agg.cache_write_5m_tokens(),
+                "cache_write_1h_tokens": agg.cache_write_1h_tokens(),
                 "cache_read_tokens": agg.cache_read_tokens(),
                 "output_tokens": agg.output_tokens(),
                 "total_tokens": agg.total_tokens(),
