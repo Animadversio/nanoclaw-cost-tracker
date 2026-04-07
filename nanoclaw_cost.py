@@ -295,8 +295,19 @@ def plot_matplotlib(project_sessions: Dict[str, List[SessionStats]],
 
         ax.set_title(proj, fontsize=9)
         ax.set_ylabel("Cumulative cost (USD)")
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d"))
-        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+        # Choose tick format based on actual time span
+        if all_calls:
+            span = (all_calls[-1].ts - all_calls[0].ts).total_seconds()
+            if span < 3 * 3600:          # < 3 hours → show HH:MM
+                fmt, loc = "%H:%M", mdates.HourLocator(interval=1)
+            elif span < 2 * 86400:       # < 2 days → show date + hour
+                fmt, loc = "%m/%d %H:%M", mdates.HourLocator(byhour=[0, 6, 12, 18])
+            elif span < 14 * 86400:      # < 2 weeks → show date
+                fmt, loc = "%m/%d", mdates.DayLocator()
+            else:
+                fmt, loc = "%m/%d", mdates.AutoDateLocator()
+            ax.xaxis.set_major_formatter(mdates.DateFormatter(fmt))
+            ax.xaxis.set_major_locator(loc)
         plt.setp(ax.xaxis.get_majorticklabels(), rotation=30, ha="right", fontsize=7)
         ax.legend(fontsize=7)
         ax.grid(True, alpha=0.3)
