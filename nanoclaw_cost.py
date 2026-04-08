@@ -312,8 +312,38 @@ def aggregate(sessions: List[SessionStats]) -> SessionStats:
 
 # ── Matplotlib plotting ────────────────────────────────────────────────────────
 
+def _bin_calls_by_time(all_calls, bin_minutes=60):
+    """Bucket calls into time bins of `bin_minutes` width.
+    Returns (bin_datetimes, costs_per_bin) sorted by time."""
+    if not all_calls:
+        return [], []
+    from datetime import timedelta
+    bin_td = timedelta(minutes=bin_minutes)
+    t0 = min(c.ts for c in all_calls)
+    # floor t0 to bin boundary
+    epoch = datetime(t0.year, t0.month, t0.day, tzinfo=t0.tzinfo)
+    offset = int((t0 - epoch).total_seconds() // (bin_minutes * 60))
+    t0_floor = epoch + offset * bin_td
+
+    bins: Dict[int, float] = defaultdict(float)
+    for c in all_calls:
+        idx = int((c.ts - t0_floor).total_seconds() // (bin_minutes * 60))
+        bins[idx] += c.cost
+
+    max_idx = max(bins.keys())
+    xs = [t0_floor + i * bin_td for i in range(max_idx + 1)]
+    ys = [bins.get(i, 0.0) for i in range(max_idx + 1)]
+    return xs, ys
+
+
 def plot_matplotlib(project_sessions: Dict[str, List[SessionStats]],
-                    out_dir: str = "."):
+                    out_dir: str = ".",
+                    mode: str = "cumulative"):
+    """
+    mode='cumulative'  — original step-line of cumulative cost (default)
+    mode='per-call'    — bar chart of cost per time bin (hourly by default)
+    mode='both'        — side-by-side: cumulative left, per-call right
+    """
     try:
         import matplotlib.pyplot as plt
         import matplotlib.dates as mdates
@@ -324,57 +354,81 @@ def plot_matplotlib(project_sessions: Dict[str, List[SessionStats]],
 
     projects = list(project_sessions.keys())
     n = len(projects)
-    cols = min(3, n)
-    rows = (n + cols - 1) // cols
 
-    fig, axes = plt.subplots(rows, cols, figsize=(7 * cols, 4 * rows), squeeze=False)
-    fig.suptitle("Cumulative API Cost Over Time — per Project", fontsize=13, y=1.01)
+    # layout: each project gets one row; columns depend on mode
+    ncols = 2 if mode == "both" else 1
+    fig, axes = plt.subplots(n, ncols, figsize=(7 * ncols, 3.5 * n), squeeze=False)
+    title = {
+        "cumulative": "Cumulative API Cost Over Time — per Project",
+        "per-call":   "Cost per Hour — per Project",
+        "both":       "API Cost: Cumulative & Per-Hour — per Project",
+    }.get(mode, "NanoClaw API Cost")
+    fig.suptitle(title, fontsize=13, y=1.01)
 
     fam_colors = {"opus": "#c0392b", "sonnet": "#2980b9", "haiku": "#27ae60", "unknown": "#888"}
 
     for idx, proj in enumerate(projects):
-        ax = axes[idx // cols][idx % cols]
         all_calls = []
         for s in project_sessions[proj]:
             all_calls.extend(s.calls)
-        if not all_calls:
-            ax.set_visible(False)
-            continue
-
         all_calls.sort(key=lambda c: c.ts)
 
-        # Split by model family and cumulative cost
-        fams = list({model_family(c.model) for c in all_calls})
-        fams.sort()
+        fams = sorted({model_family(c.model) for c in all_calls})
 
-        for fam in fams:
-            fc = [c for c in all_calls if model_family(c.model) == fam]
-            ts = [c.ts for c in fc]
-            costs = np.cumsum([c.cost for c in fc])
-            ax.step(ts, costs, where="post", label=fam,
-                    color=fam_colors.get(fam, "#888"), linewidth=1.8)
+        # ── cumulative panel ──────────────────────────────────────────────────
+        if mode in ("cumulative", "both"):
+            ax = axes[idx][0]
+            if not all_calls:
+                ax.set_visible(False)
+            else:
+                for fam in fams:
+                    fc = [c for c in all_calls if model_family(c.model) == fam]
+                    ts = [c.ts for c in fc]
+                    costs = np.cumsum([c.cost for c in fc])
+                    ax.step(ts, costs, where="post", label=fam,
+                            color=fam_colors.get(fam, "#888"), linewidth=1.8)
+                ts_all = [c.ts for c in all_calls]
+                costs_all = np.cumsum([c.cost for c in all_calls])
+                ax.step(ts_all, costs_all, where="post", label="total",
+                        color="black", linewidth=2.2, linestyle="--", alpha=0.7)
+                ax.set_title(proj, fontsize=9)
+                ax.set_ylabel("Cumulative cost (USD)")
+                loc = mdates.AutoDateLocator()
+                ax.xaxis.set_major_locator(loc)
+                ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(loc))
+                plt.setp(ax.xaxis.get_majorticklabels(), rotation=30, ha="right", fontsize=7)
+                ax.legend(fontsize=7)
+                ax.grid(True, alpha=0.3)
 
-        # Total cumulative
-        ts_all = [c.ts for c in all_calls]
-        costs_all = np.cumsum([c.cost for c in all_calls])
-        ax.step(ts_all, costs_all, where="post", label="total",
-                color="black", linewidth=2.2, linestyle="--", alpha=0.7)
-
-        ax.set_title(proj, fontsize=9)
-        ax.set_ylabel("Cumulative cost (USD)")
-        # ConciseDateFormatter automatically keeps date context visible at all
-        # zoom levels: shows "2026-04-07" as offset label + "HH:MM" on ticks
-        # when span is short, or just "Apr 7" when span is days, etc.
-        loc = mdates.AutoDateLocator()
-        ax.xaxis.set_major_locator(loc)
-        ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(loc))
-        plt.setp(ax.xaxis.get_majorticklabels(), rotation=30, ha="right", fontsize=7)
-        ax.legend(fontsize=7)
-        ax.grid(True, alpha=0.3)
-
-    # hide unused axes
-    for idx in range(n, rows * cols):
-        axes[idx // cols][idx % cols].set_visible(False)
+        # ── per-call (hourly bar) panel ────────────────────────────────────────
+        if mode in ("per-call", "both"):
+            col = 1 if mode == "both" else 0
+            ax = axes[idx][col]
+            if not all_calls:
+                ax.set_visible(False)
+            else:
+                xs, ys = _bin_calls_by_time(all_calls, bin_minutes=60)
+                bar_width = (xs[1] - xs[0]).total_seconds() / 86400 * 0.8 if len(xs) > 1 else 0.03
+                ax.bar(xs, ys, width=bar_width, color="#2980b9", alpha=0.75, label="cost/hr")
+                # overlay incoming vs outgoing as stacked bars
+                xs2, ys_in = _bin_calls_by_time(
+                    [type('_', (), {'ts': c.ts, 'cost': c.incoming_cost})() for c in all_calls],
+                    bin_minutes=60)
+                _, ys_out = _bin_calls_by_time(
+                    [type('_', (), {'ts': c.ts, 'cost': c.outgoing_cost})() for c in all_calls],
+                    bin_minutes=60)
+                if xs2:
+                    ax.bar(xs2, ys_in,  width=bar_width, color="#2980b9", alpha=0.8, label="incoming")
+                    ax.bar(xs2, ys_out, width=bar_width, color="#c0392b", alpha=0.8,
+                           bottom=ys_in, label="outgoing")
+                ax.set_title(proj + " (hourly)", fontsize=9)
+                ax.set_ylabel("Cost per hour (USD)")
+                loc = mdates.AutoDateLocator()
+                ax.xaxis.set_major_locator(loc)
+                ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(loc))
+                plt.setp(ax.xaxis.get_majorticklabels(), rotation=30, ha="right", fontsize=7)
+                ax.legend(fontsize=7)
+                ax.grid(True, alpha=0.3, axis="y")
 
     plt.tight_layout()
     out_path = os.path.join(out_dir, "nanoclaw_cost_timeline.png")
@@ -581,6 +635,9 @@ def main():
                         default="cost")
     parser.add_argument("--csv", help="Write results to CSV")
     parser.add_argument("--plot", action="store_true", help="Generate matplotlib PNG")
+    parser.add_argument("--plot-mode", choices=["cumulative", "per-call", "both"],
+                        default="cumulative",
+                        help="Plot style: cumulative (default), per-call (hourly bars), both")
     parser.add_argument("--html", action="store_true",
                         help="Generate interactive HTML dashboard (Chart.js)")
     parser.add_argument("--out-dir", default=".", help="Output directory for plots/html")
@@ -773,7 +830,7 @@ def main():
     filt = {p: project_sessions[p] for p in projects}  # keep sort order
 
     if args.plot:
-        plot_matplotlib(filt, args.out_dir)
+        plot_matplotlib(filt, args.out_dir, mode=args.plot_mode)
 
     if args.html:
         plot_html(filt, args.out_dir)

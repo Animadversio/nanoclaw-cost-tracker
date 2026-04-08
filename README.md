@@ -43,6 +43,12 @@ nanoclaw-cost-plot
 # Plots to a custom directory
 nanoclaw-cost --plot --html --out-dir ~/reports
 
+# Choose plot style with --plot-mode (default: cumulative)
+nanoclaw-cost --plot --plot-mode cumulative   # step-line of cumulative cost (default)
+nanoclaw-cost --plot --plot-mode per-call     # hourly bar chart: cost per time bin
+nanoclaw-cost --plot --plot-mode both         # side-by-side: cumulative + hourly bars
+# In per-call mode bars are stacked: incoming (blue) vs outgoing (red) per hour
+
 # Skip disk size scan (faster, omits Disk column)
 nanoclaw-cost --no-size
 
@@ -79,15 +85,19 @@ python3 ~/Github/nanoclaw-cost-tracker/nanoclaw_cost.py ~/nanoclaw/data/sessions
 
 ## Plots
 
-*`--plot`* generates `nanoclaw_cost_timeline.png` with one panel per project:
-- Left: cumulative cost over time, split by model family (sonnet / opus / haiku) + total
-- Right: daily stacked bar — incoming (blue) vs outgoing (red) cost
+*`--plot`* generates `nanoclaw_cost_timeline.png` with one panel per project.
+Use `--plot-mode` to choose the chart style:
 
-X-axis adapts to the session time span:
-- `< 3 hours` → `HH:MM`
-- `< 2 days` → `mm/dd HH:MM`
-- `< 2 weeks` → `mm/dd`
-- longer → auto
+| Mode | Description |
+|------|-------------|
+| `cumulative` (default) | Step-line of cumulative cost over time, split by model family + total |
+| `per-call` | Hourly bar chart — cost per time bin, stacked: incoming (blue) vs outgoing (red) |
+| `both` | Side-by-side: cumulative on the left, hourly bars on the right |
+
+X-axis adapts to the session time span via `ConciseDateFormatter`:
+- Short span → `HH:MM` with date as offset label
+- Day span → `mm/dd HH:MM`
+- Week+ span → `mm/dd`
 
 *`--html`* generates `nanoclaw_cost_dashboard.html` — same charts as interactive Chart.js. Open in any browser, no server needed.
 
